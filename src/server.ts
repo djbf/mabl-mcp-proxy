@@ -5,6 +5,8 @@ import express, { Request, Response } from "express";
 import pinoHttp from "pino-http";
 import { Logger } from "pino";
 
+import packageInfo from "../package.json";
+
 import { AppConfig } from "./config";
 import {
   forwardedMessagesCounter,
@@ -14,7 +16,6 @@ import {
 } from "./metrics";
 import { MablCli } from "./mablCli";
 import { SseBroker } from "./sse";
-import packageInfo from "../package.json";
 
 interface PendingRequest {
   sessionId: string;

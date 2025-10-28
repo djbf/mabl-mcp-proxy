@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
-import { EventEmitter } from "node:events";
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { Logger } from "pino";
@@ -229,12 +228,11 @@ export class MablCli extends EventEmitter {
         stdio: ["ignore", "pipe", "pipe"],
       });
 
-      let stdout = "";
       let stderr = "";
 
-      child.stdout.setEncoding("utf-8");
-      child.stdout.on("data", (chunk: string) => {
-        stdout += chunk;
+      child.stdout?.setEncoding?.("utf-8");
+      child.stdout?.on("data", () => {
+        // drain stdout to avoid backpressure; no-op handler satisfies lint.
       });
 
       child.stderr.setEncoding("utf-8");
