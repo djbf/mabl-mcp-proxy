@@ -21,32 +21,15 @@ interface PendingRequest {
   sessionId: string;
   startedAt: number;
   timeoutHandle: NodeJS.Timeout;
-}
-
-interface MessageEnvelope {
-  session: string;
-  body: Record<string, unknown>;
+  httpResponder?: Response;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function extractMessageEnvelope(req: Request): MessageEnvelope {
-  if (!isRecord(req.body)) {
-    throw new Error("Request body must be a JSON object.");
-  }
-
-  const { session, body } = req.body;
-  if (typeof session !== "string" || session.length === 0) {
-    throw new Error("Field 'session' must be a non-empty string.");
-  }
-
-  if (!isRecord(body)) {
-    throw new Error("Field 'body' must be an object.");
-  }
-
-  return { session, body };
+function isJsonRpcPayload(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && value.jsonrpc === "2.0";
 }
 
 function getRequestId(body: Record<string, unknown>): string | undefined {
@@ -168,6 +151,30 @@ export function createServer(
     return undefined;
   };
 
+  const normalizeEnvelope = (req: Request) => {
+    const payload = req.body;
+    if (isRecord(payload)) {
+      const { session, body } = payload;
+      if (
+        typeof session === "string" &&
+        session.length > 0 &&
+        isRecord(body)
+      ) {
+        return { session, body, respondInline: false };
+      }
+    }
+
+    if (isJsonRpcPayload(payload)) {
+      return {
+        session: resolveSessionIdFromRequest(req) ?? "http",
+        body: payload,
+        respondInline: true,
+      };
+    }
+
+    throw new Error("Unsupported MCP payload shape.");
+  };
+
   const handleSse: RequestHandler = (req, res) => {
     const sessionId = resolveSessionIdFromRequest(req);
     const resolvedSessionId = sseBroker.attach(res, sessionId);
@@ -176,13 +183,14 @@ export function createServer(
 
   const pendingRequests = new Map<string, PendingRequest>();
 
-  const clearPending = (id: string) => {
+  const removePending = (id: string) => {
     const pending = pendingRequests.get(id);
     if (pending) {
       clearTimeout(pending.timeoutHandle);
       pendingRequests.delete(id);
       pendingRequestsGauge.set(pendingRequests.size);
     }
+    return pending;
   };
 
   cli.on("message", (payload) => {
@@ -193,9 +201,11 @@ export function createServer(
 
     const id = getRequestId(payload);
     if (id) {
-      const pending = pendingRequests.get(id);
+      const pending = removePending(id);
       if (pending) {
-        clearPending(id);
+        if (pending.httpResponder) {
+          pending.httpResponder.status(200).json(payload);
+        }
         sseBroker.send(pending.sessionId, "message", {
           session: pending.sessionId,
           body: payload,
@@ -276,17 +286,17 @@ export function createServer(
   };
 
   const messageHandler = async (req: Request, res: Response) => {
-    let envelope: MessageEnvelope;
+    let envelope: { session: string; body: Record<string, unknown>; respondInline: boolean };
 
     try {
-      envelope = extractMessageEnvelope(req);
+      envelope = normalizeEnvelope(req);
     } catch (error) {
       logMalformedPayload((error as Error).message, req.body);
       res.status(400).json({ error: (error as Error).message });
       return;
     }
 
-    const { session, body } = envelope;
+    const { session, body, respondInline } = envelope;
     let requestId: string | undefined;
 
     try {
@@ -297,23 +307,35 @@ export function createServer(
       return;
     }
 
+    const inlineResponse = respondInline && requestId !== undefined;
+
     try {
       forwardedMessagesCounter.inc();
 
       if (requestId) {
         const timeoutHandle = setTimeout(() => {
-          logger.error(
-            { requestId, session },
+          const pending = removePending(requestId!);
+          if (!pending) {
+            return;
+          }
+
+          const timeoutPayload = buildProxyErrorPayload(
+            requestId!,
             "Timed out waiting for response from mabl CLI.",
           );
-          pendingRequests.delete(requestId!);
-          pendingRequestsGauge.set(pendingRequests.size);
-          sseBroker.send(session, "message", {
-            session,
-            body: buildProxyErrorPayload(
-              requestId!,
-              "Timed out waiting for response from mabl CLI.",
-            ),
+
+          logger.error(
+            { requestId, session: pending.sessionId },
+            "Timed out waiting for response from mabl CLI.",
+          );
+
+          if (pending.httpResponder && !pending.httpResponder.headersSent) {
+            pending.httpResponder.status(504).json(timeoutPayload);
+          }
+
+          sseBroker.send(pending.sessionId, "message", {
+            session: pending.sessionId,
+            body: timeoutPayload,
           });
         }, config.requestTimeoutMs);
         timeoutHandle.unref();
@@ -322,18 +344,43 @@ export function createServer(
           sessionId: session,
           startedAt: Date.now(),
           timeoutHandle,
+          httpResponder: inlineResponse ? res : undefined,
         });
         pendingRequestsGauge.set(pendingRequests.size);
       }
 
       await cli.send(body);
-      res.status(202).json({ accepted: true });
+
+      if (!inlineResponse) {
+        res.status(202).json({ accepted: true });
+      }
     } catch (error) {
       if (requestId) {
-        clearPending(requestId);
+        const pending = removePending(requestId);
+        if (pending?.httpResponder && !pending.httpResponder.headersSent) {
+          pending.httpResponder
+            .status(503)
+            .json(
+              buildProxyErrorPayload(
+                requestId,
+                "mabl CLI process unavailable.",
+              ),
+            );
+        }
       }
+
       logger.error({ error }, "Failed to forward message to mabl CLI.");
-      res.status(503).json({ error: "mabl CLI process unavailable." });
+
+      if (!inlineResponse && !res.headersSent) {
+        res.status(503).json({ error: "mabl CLI process unavailable." });
+      } else if (inlineResponse && !res.headersSent) {
+        res.status(503).json(
+          buildProxyErrorPayload(
+            requestId ?? "unknown",
+            "mabl CLI process unavailable.",
+          ),
+        );
+      }
     }
   };
 
