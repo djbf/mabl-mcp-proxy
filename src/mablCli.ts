@@ -47,7 +47,14 @@ export class MablCli extends EventEmitter {
     }
 
     await this.prepareEnvironment();
-    await this.authenticate();
+    try {
+      await this.authenticate();
+    } catch (error) {
+      this.options.logger.warn(
+        { error },
+        "mabl CLI pre-authentication failed; continuing with provided API key.",
+      );
+    }
     await this.spawnCli();
   }
 
@@ -137,6 +144,7 @@ export class MablCli extends EventEmitter {
           ...this.options.env,
           NPX_YES: "1",
           FORCE_COLOR: "0",
+          MABL_API_KEY: this.options.apiKey,
           HOME: this.homeDir,
           NPM_CONFIG_CACHE: this.cacheDir,
           npm_config_cache: this.cacheDir,
@@ -243,6 +251,7 @@ export class MablCli extends EventEmitter {
           ...this.options.env,
           NPX_YES: "1",
           FORCE_COLOR: "0",
+          MABL_API_KEY: this.options.apiKey,
           HOME: this.homeDir,
           NPM_CONFIG_CACHE: this.cacheDir,
           npm_config_cache: this.cacheDir,
