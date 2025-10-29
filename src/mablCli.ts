@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { EventEmitter, once } from "node:events";
+import fs from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { Logger } from "pino";
@@ -19,6 +20,8 @@ export interface MablCliOptions {
   logger: Logger;
   restartDelayMs?: number;
   env?: NodeJS.ProcessEnv;
+  cacheDir?: string;
+  homeDir?: string;
 }
 
 export class MablCli extends EventEmitter {
@@ -29,8 +32,13 @@ export class MablCli extends EventEmitter {
   private closed = false;
   private lastMessageTimestamp: number | null = null;
 
+  private readonly cacheDir: string;
+  private readonly homeDir: string;
+
   constructor(private readonly options: MablCliOptions) {
     super();
+    this.cacheDir = options.cacheDir ?? "/tmp/mabl-cli-cache";
+    this.homeDir = options.homeDir ?? "/tmp/mabl-cli-home";
   }
 
   async start(): Promise<void> {
@@ -38,6 +46,7 @@ export class MablCli extends EventEmitter {
       throw new Error("Cannot start mabl CLI after shutdown.");
     }
 
+    await this.prepareEnvironment();
     await this.authenticate();
     await this.spawnCli();
   }
@@ -52,6 +61,13 @@ export class MablCli extends EventEmitter {
 
   getRestartCount(): number {
     return this.restarts;
+  }
+
+  private async prepareEnvironment(): Promise<void> {
+    await Promise.all([
+      fs.mkdir(this.cacheDir, { recursive: true }),
+      fs.mkdir(this.homeDir, { recursive: true }),
+    ]);
   }
 
   async send(payload: unknown): Promise<void> {
@@ -121,6 +137,9 @@ export class MablCli extends EventEmitter {
           ...this.options.env,
           NPX_YES: "1",
           FORCE_COLOR: "0",
+          HOME: this.homeDir,
+          NPM_CONFIG_CACHE: this.cacheDir,
+          npm_config_cache: this.cacheDir,
         },
         stdio: ["pipe", "pipe", "pipe"],
       },
@@ -224,6 +243,9 @@ export class MablCli extends EventEmitter {
           ...this.options.env,
           NPX_YES: "1",
           FORCE_COLOR: "0",
+          HOME: this.homeDir,
+          NPM_CONFIG_CACHE: this.cacheDir,
+          npm_config_cache: this.cacheDir,
         },
         stdio: ["ignore", "pipe", "pipe"],
       });
