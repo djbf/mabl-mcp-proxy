@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { Response } from "express";
 import { Logger } from "pino";
 
@@ -43,11 +45,12 @@ export class SseBroker {
     this.heartbeatTimer.unref();
   }
 
-  attach(sessionId: string, res: Response): void {
-    const existing = this.clients.get(sessionId);
+  attach(res: Response, sessionId?: string): string {
+    const resolvedSessionId = sessionId && sessionId.length > 0 ? sessionId : randomUUID();
+    const existing = this.clients.get(resolvedSessionId);
     if (existing) {
       this.logger.warn(
-        { sessionId },
+        { sessionId: resolvedSessionId },
         "Replacing existing SSE connection for session.",
       );
       existing.res.end();
@@ -64,26 +67,28 @@ export class SseBroker {
     }
 
     const client: SseClient = {
-      sessionId,
+      sessionId: resolvedSessionId,
       res,
       connectedAt: Date.now(),
       lastEventAt: Date.now(),
     };
 
-    this.clients.set(sessionId, client);
+    this.clients.set(resolvedSessionId, client);
     sseClientsGauge.inc();
 
     res.write(`event: ready\n`);
-    res.write(`data: {"session":"${sessionId}"}\n\n`);
+    res.write(`data: {"session":"${resolvedSessionId}"}\n\n`);
 
     res.on("close", () => {
-      this.removeClient(sessionId);
+      this.removeClient(resolvedSessionId);
     });
 
     res.on("error", (error) => {
-      this.logger.warn({ sessionId, error }, "SSE stream error.");
-      this.removeClient(sessionId);
+      this.logger.warn({ sessionId: resolvedSessionId, error }, "SSE stream error.");
+      this.removeClient(resolvedSessionId);
     });
+
+    return resolvedSessionId;
   }
 
   send(

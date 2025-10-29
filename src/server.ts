@@ -132,6 +132,48 @@ export function createServer(
     idleTimeoutMs: config.idleTimeoutMs,
   });
 
+  const manifest = {
+    name: packageInfo.name,
+    version: packageInfo.version,
+    description: packageInfo.description,
+    capabilities: {},
+    transport: {
+      type: "http",
+      endpoints: {
+        messages: "/messages",
+      },
+    },
+  };
+
+  const resolveSessionIdFromRequest = (req: Request): string | undefined => {
+    if (typeof req.query.session === "string" && req.query.session.length > 0) {
+      return req.query.session;
+    }
+
+    const headerCandidates = [
+      "x-mcp-session",
+      "x-mcp-session-id",
+      "x-session-id",
+      "x-openai-session-id",
+      "x-openai-mcp-session-id",
+    ] as const;
+
+    for (const header of headerCandidates) {
+      const value = req.header(header);
+      if (typeof value === "string" && value.length > 0) {
+        return value;
+      }
+    }
+
+    return undefined;
+  };
+
+  const handleSse = (req: Request, res: Response) => {
+    const sessionId = resolveSessionIdFromRequest(req);
+    const resolvedSessionId = sseBroker.attach(res, sessionId);
+    logger.debug({ sessionId: resolvedSessionId }, "Attached SSE client.");
+  };
+
   const pendingRequests = new Map<string, PendingRequest>();
 
   const clearPending = (id: string) => {
@@ -189,11 +231,15 @@ export function createServer(
     pendingRequestsGauge.set(0);
   });
 
-  app.get("/", (_req, res) => {
+  app.get("/", (req, res) => {
+    const accepts = req.headers.accept ?? "";
+    if (accepts.includes("text/event-stream")) {
+      handleSse(req, res);
+      return;
+    }
+
     res.json({
-      name: packageInfo.name,
-      version: packageInfo.version,
-      description: packageInfo.description,
+      ...manifest,
       uptimeSeconds: process.uptime(),
     });
   });
@@ -224,15 +270,10 @@ export function createServer(
   });
 
   app.get("/messages", (req, res) => {
-    const sessionId = req.query.session;
-    if (typeof sessionId !== "string" || sessionId.length === 0) {
-      res.status(400).json({ error: "Query parameter 'session' is required." });
-      return;
-    }
-    sseBroker.attach(sessionId, res);
+    handleSse(req, res);
   });
 
-  app.post("/messages", async (req, res) => {
+  const messageHandler = async (req: Request, res: Response) => {
     let envelope: MessageEnvelope;
 
     try {
@@ -290,7 +331,10 @@ export function createServer(
       logger.error({ error }, "Failed to forward message to mabl CLI.");
       res.status(503).json({ error: "mabl CLI process unavailable." });
     }
-  });
+  };
+
+  app.post("/messages", messageHandler);
+  app.post("/", messageHandler);
 
   const server =
     config.tls != null
