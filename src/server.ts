@@ -271,12 +271,17 @@ export function createServer(
 
   app.get("/messages", handleSse);
 
+  const logMalformedPayload = (reason: string, payload: unknown) => {
+    logger.warn({ reason, payload }, "Rejecting inbound MCP POST payload.");
+  };
+
   const messageHandler = async (req: Request, res: Response) => {
     let envelope: MessageEnvelope;
 
     try {
       envelope = extractMessageEnvelope(req);
     } catch (error) {
+      logMalformedPayload((error as Error).message, req.body);
       res.status(400).json({ error: (error as Error).message });
       return;
     }
@@ -287,6 +292,7 @@ export function createServer(
     try {
       requestId = getRequestId(body);
     } catch (error) {
+      logMalformedPayload((error as Error).message, req.body);
       res.status(400).json({ error: (error as Error).message });
       return;
     }
