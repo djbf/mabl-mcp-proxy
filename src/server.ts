@@ -1,7 +1,7 @@
 import http from "node:http";
 import https from "node:https";
 
-import express, { Request, Response } from "express";
+import express, { Request, RequestHandler, Response } from "express";
 import pinoHttp from "pino-http";
 import { Logger } from "pino";
 
@@ -168,7 +168,7 @@ export function createServer(
     return undefined;
   };
 
-  const handleSse = (req: Request, res: Response) => {
+  const handleSse: RequestHandler = (req, res) => {
     const sessionId = resolveSessionIdFromRequest(req);
     const resolvedSessionId = sseBroker.attach(res, sessionId);
     logger.debug({ sessionId: resolvedSessionId }, "Attached SSE client.");
@@ -231,10 +231,10 @@ export function createServer(
     pendingRequestsGauge.set(0);
   });
 
-  app.get("/", (req, res) => {
+  app.get("/", (req, res, next) => {
     const accepts = req.headers.accept ?? "";
     if (accepts.includes("text/event-stream")) {
-      handleSse(req, res);
+      handleSse(req, res, next);
       return;
     }
 
@@ -269,9 +269,7 @@ export function createServer(
     res.send(await getRegistry().metrics());
   });
 
-  app.get("/messages", (req, res) => {
-    handleSse(req, res);
-  });
+  app.get("/messages", handleSse);
 
   const messageHandler = async (req: Request, res: Response) => {
     let envelope: MessageEnvelope;
